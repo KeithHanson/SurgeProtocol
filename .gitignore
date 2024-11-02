@@ -1,0 +1,45 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Compiled object files
+*.o
+*.a
+*.lo
+*.la
+*.lai
+
+# Redis and server-specific files
+dump.rdb
+appendonly.aof
+*.db
+
+# Persistent storage files
+*.log
+*.pid
+
+# Directories for cache
+node_modules/
+build/
+dist/
+
+# Go specific ignores
+*.out
+*.test
+vendor/
+
+# Configuration files (not to be shared or versioned)
+config.json
+.env
+
+# IDE/editor specific files
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db

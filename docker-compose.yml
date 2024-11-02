@@ -1,0 +1,50 @@
+services:
+
+  redis:
+    image: redis:alpine
+    container_name: surge-protocol-redis
+    ports:
+      - "6379:6379"
+
+  surge-server:
+    build: ./server
+    container_name: surge-protocol-server
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+    volumes:
+      - ./shared:/app/shared
+
+  go-client:
+    build: ./clients/go-client
+    container_name: surge-protocol-go-client
+    depends_on:
+      - surge-server
+    environment:
+      - SERVER_HOST=surge-server
+    volumes:
+      - ./clients/go-client:/client-code
+    command: ["./run.sh"]
+
+  python-client:
+    build: ./clients/python-client
+    container_name: surge-protocol-python-client
+    depends_on:
+      - surge-server
+    volumes:
+      - ./clients/python-client:/client-code
+    command: ["./run.sh"]
+
+  node-client:
+    build: ./clients/node-client
+    container_name: surge-protocol-node-client
+    depends_on:
+      - surge-server
+    volumes:
+      - ./clients/node-client:/client-code
+    command: ["./run.sh"]
+    
+networks:
+  default:
+    driver: bridge
