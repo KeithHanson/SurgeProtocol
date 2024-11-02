@@ -1,6 +1,8 @@
 package main
 
 import (
+    "crypto/rand"
+    "encoding/hex"
     "encoding/json"
     "fmt"
     "io/ioutil"
@@ -9,7 +11,8 @@ import (
     "os"
     "sync"
     "time"
-
+    "strings"
+    
     "github.com/go-redis/redis/v8"
     "golang.org/x/net/context"
 )
@@ -18,14 +21,14 @@ var (
     rdb     *redis.Client
     ctx     = context.Background()
     mu      sync.Mutex
-    conns   = make(map[net.Conn]struct{}) // Use a thread-safe map for active connections
-    config  Config                        // Global server configuration
+    conns   = make(map[net.Conn]struct{})
+    config  Config
 )
 
 // Config struct for reading JSON configuration
 type Config struct {
-    TickDuration int    `json:"tick_duration"` // Tick duration in seconds
-    ServerPort   string `json:"server_port"`   // Port for the server to listen on
+    TickDuration int    `json:"tick_duration"`
+    ServerPort   string `json:"server_port"`
 }
 
 // Load configuration from the config.json file
@@ -50,6 +53,140 @@ func loadConfig() error {
     return nil
 }
 
+// GameState struct, stored in Redis
+type GameState struct {
+    Tick       int            `json:"tick"`
+    Players    map[string]Player `json:"players"` // Map of apiKey -> Player
+}
+
+type Player struct {
+    ApiKey  string `json:"api_key"`
+    Name    string `json:"name"`
+    Commands []string `json:"commands"` // Buffered commands
+}
+
+// Load or Initialize Game State from Redis
+func loadOrInitGameState() *GameState {
+    state := &GameState{}
+    result, err := rdb.Get(ctx, "game:state").Result()
+    if err == redis.Nil {
+        // If no game state is found, initialize
+        state = &GameState{
+            Tick:    0,
+            Players: make(map[string]Player),
+        }
+        saveGameState(*state)
+        log.Println("Initialized new game state.")
+    } else if err != nil {
+        log.Fatalf("Failed to load game state from Redis: %v", err)
+    } else {
+        if err := json.Unmarshal([]byte(result), state); err != nil {
+            log.Fatalf("Failed to parse game state: %v", err)
+        }
+        log.Println("Loaded game state from Redis.")
+    }
+    return state
+}
+
+// Save game state in Redis
+func saveGameState(state GameState) {
+    data, _ := json.Marshal(state)
+    if err := rdb.Set(ctx, "game:state", data, 0).Err(); err != nil {
+        log.Fatalf("Failed to store game state: %v", err)
+    }
+}
+
+// Generate a new API key for a player
+func generateApiKey() string {
+    key := make([]byte, 16)
+    _, err := rand.Read(key)
+    if err != nil {
+        log.Fatalf("Error generating API key: %v", err)
+    }
+    return hex.EncodeToString(key)
+}
+
+// Parse commands from clients
+func parseCommand(conn net.Conn, input string, state *GameState) {
+    parts := strings.Split(strings.TrimSpace(input), " ")
+    if len(parts) == 0 {
+        conn.Write([]byte("ERROR: Invalid command format\n"))
+        return
+    }
+
+    log.Printf("\n\nPARTS 0: %s\n\n", parts[0])
+
+    switch parts[0] {
+    case "NEW_API_KEY":
+        apiKey := generateApiKey()
+        conn.Write([]byte(fmt.Sprintf("NEW_API_KEY %s\n", apiKey)))
+        return
+
+    case "INIT_PLAYER":
+        if len(parts) < 3 {
+            conn.Write([]byte("ERROR: Invalid INIT_PLAYER format: INIT_PLAYER API_KEY NAME\n"))
+            return
+        }
+        apiKey := parts[1]
+        name := parts[2]
+        if _, exists := state.Players[apiKey]; exists {
+            conn.Write([]byte("ERROR: Player already exists\n"))
+            return
+        }
+        state.Players[apiKey] = Player{ApiKey: apiKey, Name: name, Commands: []string{}}
+        saveGameState(*state)
+        conn.Write([]byte("OK: Player initialized\n"))
+
+    case "COMMAND":
+        if len(parts) < 3 {
+            conn.Write([]byte("ERROR: COMMAND requires API key and action\n"))
+            return
+        }
+        apiKey := parts[1]
+        if player, exists := state.Players[apiKey]; !exists {
+            conn.Write([]byte("ERROR: Player not found\n"))
+        } else {
+            action := parts[2:] // Store the rest as a command
+            commandStr := formatCommand(action)
+            player.Commands = append(player.Commands, commandStr)
+            state.Players[apiKey] = player
+            saveGameState(*state)
+            conn.Write([]byte("OK: Command staged\n"))
+        }
+
+    case "COMMIT":
+        if len(parts) < 2 {
+            conn.Write([]byte("ERROR: COMMIT requires API key\n"))
+            return
+        }
+        apiKey := parts[1]
+        if player, exists := state.Players[apiKey]; !exists {
+            conn.Write([]byte("ERROR: Player not found\n"))
+        } else {
+            // Execute commands
+            executeCommands(player.Commands)
+            player.Commands = []string{} // Clear the command queue once executed
+            state.Players[apiKey] = player
+            saveGameState(*state)
+            conn.Write([]byte("OK: Commands committed\n"))
+        }
+
+    default:
+        conn.Write([]byte(fmt.Sprintf("ERROR: Unknown command %s\n", parts[0])))
+    }
+}
+
+func formatCommand(parts []string) string {
+    return fmt.Sprintf("%s", parts)
+}
+
+func executeCommands(commands []string) {
+    for _, cmd := range commands {
+        log.Printf("Executing command: %s", cmd)
+        // Actual game logic to execute command goes here
+    }
+}
+
 // Send tick message to all connected clients
 func sendTickMessage(tick int) {
     mu.Lock()
@@ -69,27 +206,22 @@ func sendTickMessage(tick int) {
 }
 
 // Game tick process - Sends "TICK X" every tick_duration seconds
-func gameLoop() {
-    tick := 0
+func gameLoop(state *GameState) {
     for {
-        time.Sleep(time.Duration(config.TickDuration) * time.Second) // Use tick duration from configuration
-        tick++
-        log.Printf("Surge Protocol: Sending tick %d", tick)
-        sendTickMessage(tick)
+        time.Sleep(time.Duration(config.TickDuration) * time.Second)
+        state.Tick++
+        log.Printf("Tick %d", state.Tick)
+        sendTickMessage(state.Tick)
 
-        // Simulate storing the tick count in Redis
-        err := rdb.Set(ctx, "game:tick", tick, 0).Err()
-        if err != nil {
-            log.Println("Redis error:", err)
-        }
+        // Store the tick count in Redis
+        saveGameState(*state)
     }
 }
 
 // Handle incoming client connections
-func handleConnection(conn net.Conn) {
+func handleConnection(conn net.Conn, state *GameState) {
     log.Printf("New client connected: %v", conn.RemoteAddr())
 
-    // Add connection to the set
     mu.Lock()
     conns[conn] = struct{}{}
     mu.Unlock()
@@ -102,24 +234,26 @@ func handleConnection(conn net.Conn) {
         log.Printf("Client disconnected: %v", conn.RemoteAddr())
     }()
 
-    // We won't read data from the client, but keep the connection for tick messages
     for {
-        buf := make([]byte, 1)
-        _, err := conn.Read(buf)
+        buf := make([]byte, 1024)
+        length, err := conn.Read(buf)
         if err != nil {
-            return // Client disconnected or error occurred
+            return
         }
+        input := string(buf[:length])
+        log.Printf("Received: %s", input)
+        parseCommand(conn, input, state)
     }
 }
 
 // Start the TCP server that listens for client connections
-func startServer() {
+func startServer(state *GameState) {
     address := fmt.Sprintf(":%s", config.ServerPort)
     listener, err := net.Listen("tcp", address)
     if err != nil {
-        log.Fatalf("Error starting Surge Protocol server: %v", err)
+        log.Fatalf("Failed to start server: %v", err)
     }
-    log.Printf("Surge Protocol server listening on port %s", config.ServerPort)
+    log.Printf("Server listening on port %s", config.ServerPort)
 
     for {
         conn, err := listener.Accept()
@@ -127,29 +261,30 @@ func startServer() {
             log.Println("Error accepting connection:", err)
             continue
         }
-        go handleConnection(conn) // Handle each connection in a new goroutine
+        go handleConnection(conn, state)
     }
 }
 
 // Initialize Redis connection
 func initRedis() {
     rdb = redis.NewClient(&redis.Options{
-        Addr: "redis:6379", // Redis hostname set in docker-compose
+        Addr: "redis:6379",
     })
     if _, err := rdb.Ping(ctx).Result(); err != nil {
-        log.Fatalf("Error connecting to Redis: %v", err)
+        log.Fatalf("Failed to connect to Redis: %v", err)
     }
-    log.Println("Surge Protocol connected to Redis.")
+    log.Println("Connected to Redis.")
 }
 
 func main() {
-    // Load configuration from config.json
     if err := loadConfig(); err != nil {
         log.Fatalf("Failed to load configuration: %v", err)
     }
 
-    go gameLoop()  // Start the tick system loop (uses tick_duration)
+    initRedis()    // Initialize Redis connection
+    state := loadOrInitGameState() // Load or initialize game state
 
-    initRedis()    // Initialize Redis
-    startServer()  // Start the TCP server to accept client connections
+    go gameLoop(state)  // Start the tick system loop
+
+    startServer(state)  // Start the TCP server to accept client connections
 }
