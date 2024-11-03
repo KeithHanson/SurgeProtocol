@@ -112,6 +112,8 @@ response = sock.recv(1024)
 print(response.decode('utf-8'))
 ```
 
+### Node
+
 ```javascript
 const net = require('net');
 
@@ -140,6 +142,8 @@ client.on('data', (data) => {
     }
 });
 ```
+
+### Go
 
 ```go
 package main

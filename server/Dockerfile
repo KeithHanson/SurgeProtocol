@@ -11,4 +11,4 @@ RUN go build -o surge-protocol-server .
 
 EXPOSE 8080
 
-ENTRYPOINT ["./surge-protocol-server"]
+ENTRYPOINT ["sh", "./run.sh"]
