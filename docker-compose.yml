@@ -11,6 +11,7 @@ services:
     container_name: surge-protocol-server
     ports:
       - "8080:8080"
+      - "8081:80"
     depends_on:
       - redis
     volumes:

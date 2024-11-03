@@ -1,2 +1,1 @@
-go build -o surge-protocol-server .
-./surge-protocol-server
+go build -o surge-protocol-server . && echo "Build step completed." && ./surge-protocol-server
